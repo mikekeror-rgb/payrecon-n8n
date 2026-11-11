@@ -36,7 +36,7 @@ PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx -y n8n
 
 Open http://localhost:5678, import `payrecon-n8n.workflow.json`, create a **Header Auth**
 credential named `Anthropic API key` (header `x-api-key`, value your key), select it on the
-**Ask Claude** node, save, and set the workflow to **Active**.
+**Ask Claude** node, then **Publish** the workflow (on n8n 1.x, save and set it to **Active**).
 
 ## Results
 
