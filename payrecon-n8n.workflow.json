@@ -1,0 +1,421 @@
+{
+  "name": "payrecon in n8n: M-Pesa matching with human approval",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "mpesa-payment",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "300678c1-0320-47a5-85e2-ea481f371a10",
+      "name": "Payment received",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "e6228f23-acaf-4759-b015-c4de407797d2"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Open invoices. In payrecon these come from PostgreSQL; here they are fixed test data.\nconst INVOICES = [\n  { id: \"INV-0001\", customer: \"Acme Hardware\", amount: 1500 },\n  { id: \"INV-0006\", customer: \"Grace Wanjiku\", amount: 50 },\n  { id: \"INV-0007\", customer: \"Peter Otieno\", amount: 50 },\n  { id: \"INV-0008\", customer: \"Mary Achieng\", amount: 50 },\n];\n// Code decides every exact match; the model is only asked about the rest.\nconst store = $getWorkflowStaticData(\"global\");\nstore.paid = store.paid || {};\nstore.audit = store.audit || [];\n\nconst p = $input.first().json.body ?? $input.first().json;\nconst payment = {\n  trans_id: String(p.trans_id ?? \"\").trim(),\n  amount: Number(p.amount),\n  payer_name: String(p.payer_name ?? \"\").trim(),\n  bill_ref: String(p.bill_ref ?? \"\").trim().toUpperCase(),\n};\nif (!payment.trans_id || !Number.isFinite(payment.amount) || payment.amount <= 0) {\n  return [{ json: { route: \"invalid\", payment, reason: \"Missing transaction id or a positive amount.\" } }];\n}\nif (store.paid[payment.trans_id]) {\n  return [{ json: { route: \"duplicate\", payment, reason: `Transaction ${payment.trans_id} was already applied to ${store.paid[payment.trans_id]}.` } }];\n}\nconst exact = INVOICES.find((i) => i.id === payment.bill_ref && i.amount === payment.amount);\nif (exact) {\n  const alreadyPaid = Object.values(store.paid).includes(exact.id);\n  if (alreadyPaid) {\n    return [{ json: { route: \"review\", payment, candidates: [exact], reason: `Invoice ${exact.id} is already paid: possible double payment.` } }];\n  }\n  return [{ json: { route: \"exact\", payment, invoice: exact } }];\n}\n// Candidates: open invoices with the same amount. The model may only choose among these.\nconst candidates = INVOICES.filter((i) => i.amount === payment.amount && !Object.values(store.paid).includes(i.id));\nreturn [{ json: { route: candidates.length ? \"suggest\" : \"review\", payment, candidates,\n  reason: candidates.length ? \"\" : \"No open invoice has this amount.\" } }];"
+      },
+      "id": "ebb19a7f-a858-479b-ba23-6e680a91fc05",
+      "name": "Match in code",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.route }}",
+              "value2": "exact"
+            }
+          ]
+        }
+      },
+      "id": "8b528c88-0edd-43bd-b355-8aeba44f73d6",
+      "name": "Exact match?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Apply an exact match and record it in the audit log.\nconst store = $getWorkflowStaticData(\"global\");\nconst { payment, invoice } = $input.first().json;\nstore.paid[payment.trans_id] = invoice.id;\nstore.audit.push({ at: new Date().toISOString(), trans_id: payment.trans_id, invoice: invoice.id, by: \"code (exact match)\" });\nreturn [{ json: { status: \"paid\", trans_id: payment.trans_id, invoice: invoice.id, decided_by: \"code\" } }];"
+      },
+      "id": "f8f77267-183e-477e-802b-cc54b2998bc3",
+      "name": "Apply and log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "70753a70-e74e-48b9-8691-855397318db2",
+      "name": "Reply: paid",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        880,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.route }}",
+              "value2": "suggest"
+            }
+          ]
+        }
+      },
+      "id": "ab1136d1-0e8a-4dec-846a-ff5a8ab56ed7",
+      "name": "Needs the model?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        660,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the request. The model gets the payment and the candidate invoices only.\nconst { payment, candidates } = $input.first().json;\nconst system = \"You match one M-Pesa payment to one of the given candidate invoices. Payers often type nicknames or part of a name. Answer only with JSON: {\\\"invoice_id\\\": string or null, \\\"confidence\\\": \\\"high\\\"|\\\"medium\\\"|\\\"low\\\", \\\"reason\\\": one short plain-English sentence}. Use null when the evidence does not single out one invoice. Never invent an invoice id.\";\nconst user = JSON.stringify({ payment, candidates });\nreturn [{ json: { ...$input.first().json, request: {\n  model: \"claude-haiku-4-5-20251001\", max_tokens: 300, system,\n  messages: [{ role: \"user\", content: user }],\n} } }];"
+      },
+      "id": "921b281b-2fa3-46e9-bd61-72774f0e1f5a",
+      "name": "Build prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "73762bbc-eb99-4bbf-b812-5b4968fc0954",
+      "name": "Ask Claude",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        360
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "Anthropic API key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Guardrail: code checks the model's answer before a person sees it.\nconst prev = $(\"Build prompt\").first().json;\nconst text = $input.first().json.content?.[0]?.text ?? \"\";\nlet s = { invoice_id: null, confidence: \"low\", reason: \"The model's answer could not be read.\" };\ntry {\n  const m = text.match(/\\{[\\s\\S]*\\}/);\n  if (m) s = { ...s, ...JSON.parse(m[0]) };\n} catch (e) {}\nconst ids = prev.candidates.map((c) => c.id);\nif (s.invoice_id !== null && !ids.includes(s.invoice_id)) {\n  s = { invoice_id: null, confidence: \"low\", reason: `The model named ${s.invoice_id}, which is not a candidate. Ignored.` };\n}\nif (![\"high\", \"medium\", \"low\"].includes(s.confidence)) s.confidence = \"low\";\nreturn [{ json: { route: \"review\", payment: prev.payment, candidates: prev.candidates, suggestion: s,\n  reason: s.reason } }];"
+      },
+      "id": "14e0ac71-6ab0-4ded-865a-28df746927ba",
+      "name": "Check the answer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'needs_approval', trans_id: $json.payment.trans_id, reason: $json.reason, suggestion: $json.suggestion ?? null, approve_url: $execution.resumeUrl + '&decision=approve', reject_url: $execution.resumeUrl + '&decision=reject' }) }}",
+        "options": {}
+      },
+      "id": "34e6600a-d15d-4291-a70a-f8201859ef11",
+      "name": "Ask for approval",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1540,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "webhook",
+        "options": {}
+      },
+      "id": "24240cfa-cab1-4d65-8f98-d7d089bf7165",
+      "name": "Wait for a person",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1760,
+        440
+      ],
+      "webhookId": "76a5a352-c88d-481d-a9c8-9be0d3324b0d"
+    },
+    {
+      "parameters": {
+        "jsCode": "// A person decided. Apply only an approved suggestion, and log every decision.\nconst store = $getWorkflowStaticData(\"global\");\nconst item = $(\"Ask for approval\").first().json;\nconst q = $input.first().json.query ?? {};\nconst decision = q.decision === \"approve\" ? \"approve\" : \"reject\";\nconst invoice = item.suggestion?.invoice_id ?? null;\nif (decision === \"approve\" && invoice) store.paid[item.payment.trans_id] = invoice;\nstore.audit.push({ at: new Date().toISOString(), trans_id: item.payment.trans_id,\n  invoice: decision === \"approve\" ? invoice : null, by: `person (${decision})`,\n  suggested: invoice, reason: item.reason });\nreturn [{ json: { status: decision === \"approve\" && invoice ? \"paid\" : \"left open\", trans_id: item.payment.trans_id, invoice: decision === \"approve\" ? invoice : null } }];"
+      },
+      "id": "7d29ea45-9d0d-4fdf-8e03-54e48b2e5c4c",
+      "name": "Record decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1980,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "mpesa-audit",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "ad05ab8a-797f-4103-8209-bce36a6ee9b2",
+      "name": "Audit log",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        700
+      ],
+      "webhookId": "2a397262-6821-4258-a471-6fa017473920"
+    },
+    {
+      "parameters": {
+        "jsCode": "const store = $getWorkflowStaticData(\"global\");\nreturn [{ json: { paid: store.paid ?? {}, audit: store.audit ?? [] } }];"
+      },
+      "id": "e112b28a-1383-4e50-b5d4-a23779db3f3e",
+      "name": "Read log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "mpesa-reset",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "df98c5b8-4175-4a99-9168-66b5d9b9a8a6",
+      "name": "Reset (test data only)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        900
+      ],
+      "webhookId": "24c4b423-6108-4eaa-ad51-b756b94c4640"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Clears paid invoices and the audit log, so the evaluation starts from the same state.\nconst store = $getWorkflowStaticData(\"global\");\nstore.paid = {};\nstore.audit = [];\nreturn [{ json: { reset: true } }];"
+      },
+      "id": "084f0b00-a092-49cd-b018-f17e7c88cbb7",
+      "name": "Clear state",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        900
+      ]
+    }
+  ],
+  "connections": {
+    "Payment received": {
+      "main": [
+        [
+          {
+            "node": "Match in code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Match in code": {
+      "main": [
+        [
+          {
+            "node": "Exact match?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Exact match?": {
+      "main": [
+        [
+          {
+            "node": "Apply and log",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Needs the model?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply and log": {
+      "main": [
+        [
+          {
+            "node": "Reply: paid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs the model?": {
+      "main": [
+        [
+          {
+            "node": "Build prompt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ask for approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build prompt": {
+      "main": [
+        [
+          {
+            "node": "Ask Claude",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask Claude": {
+      "main": [
+        [
+          {
+            "node": "Check the answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check the answer": {
+      "main": [
+        [
+          {
+            "node": "Ask for approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask for approval": {
+      "main": [
+        [
+          {
+            "node": "Wait for a person",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for a person": {
+      "main": [
+        [
+          {
+            "node": "Record decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Audit log": {
+      "main": [
+        [
+          {
+            "node": "Read log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reset (test data only)": {
+      "main": [
+        [
+          {
+            "node": "Clear state",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false
+}

@@ -1,0 +1,16 @@
+[
+  {"name": "exact reference and amount", "payment": {"trans_id": "TX1001", "amount": 1500, "payer_name": "ACME HARDWARE LTD", "bill_ref": "INV-0001"},
+   "expect": {"status": "paid", "invoice": "INV-0001"}},
+  {"name": "same transaction sent twice", "payment": {"trans_id": "TX1001", "amount": 1500, "payer_name": "ACME HARDWARE LTD", "bill_ref": "INV-0001"},
+   "expect": {"status": "needs_approval", "reason_contains": "already applied"}},
+  {"name": "second payment for a paid invoice", "payment": {"trans_id": "TX1002", "amount": 1500, "payer_name": "ACME HARDWARE LTD", "bill_ref": "INV-0001"},
+   "expect": {"status": "needs_approval", "reason_contains": "double payment"}},
+  {"name": "no open invoice with this amount", "payment": {"trans_id": "TX1003", "amount": 999, "payer_name": "JOHN DOE", "bill_ref": ""},
+   "expect": {"status": "needs_approval", "reason_contains": "No open invoice"}},
+  {"name": "missing amount", "payment": {"trans_id": "TX1004", "payer_name": "JOHN DOE", "bill_ref": "INV-0006"},
+   "expect": {"status": "needs_approval", "reason_contains": "positive amount"}},
+  {"name": "nickname among three same-amount invoices", "payment": {"trans_id": "TX1005", "amount": 50, "payer_name": "SHIKU", "bill_ref": ""},
+   "expect": {"status": "needs_approval", "suggested_in": ["INV-0006"], "llm": true}},
+  {"name": "name that fits no candidate", "payment": {"trans_id": "TX1006", "amount": 50, "payer_name": "J MWANGI", "bill_ref": ""},
+   "expect": {"status": "needs_approval", "suggested_in": [null], "llm": true}}
+]
