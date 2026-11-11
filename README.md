@@ -5,6 +5,8 @@ M-Pesa payment to an open invoice. Code makes every exact match; Claude is asked
 payments code cannot match, a guardrail checks its answer, and a person approves before anything
 is applied. Every decision goes into an audit log.
 
+![The workflow in n8n](docs/workflow.png)
+
 ## Flow
 
 1. **Payment received** (webhook `POST /webhook/mpesa-payment`).
@@ -35,6 +37,12 @@ PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx -y n8n
 Open http://localhost:5678, import `payrecon-n8n.workflow.json`, create a **Header Auth**
 credential named `Anthropic API key` (header `x-api-key`, value your key), select it on the
 **Ask Claude** node, save, and set the workflow to **Active**.
+
+## Results
+
+- Evaluation: code paths 5/5, model suggestions 2/2.
+- End-to-end: an approved suggestion ("SHIKU" → Grace Wanjiku, INV-0006) was marked paid and logged as `person (approve)`; a rejected one stayed unpaid and was logged as `person (reject)`.
+- Testing caught a real bug: the approval links added a second `?` to n8n's signed resume URL, so approving failed with "Invalid token". It failed safely (nothing was paid) and now uses `&`.
 
 ## Evaluate
 
